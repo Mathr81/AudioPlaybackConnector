@@ -15,6 +15,7 @@ namespace fs = std::filesystem;
 
 constexpr UINT WM_NOTIFYICON = WM_APP + 1;
 constexpr UINT WM_CONNECTDEVICE = WM_APP + 2;
+constexpr UINT WM_CONNECTIONCLOSED = WM_APP + 3;
 
 HANDLE g_hMutex = nullptr;
 HINSTANCE g_hInst;
@@ -25,9 +26,17 @@ Flyout g_xamlFlyout = nullptr;
 MenuFlyout g_xamlMenu = nullptr;
 FocusState g_menuFocusState = FocusState::Unfocused;
 DevicePicker g_devicePicker = nullptr;
+struct WorkerProcessInfo
+{
+	HANDLE processHandle = nullptr;
+	HANDLE stopEventHandle = nullptr;
+	fs::path executablePath;
+};
 std::unordered_map<std::wstring, std::pair<DeviceInformation, AudioPlaybackConnection>> g_audioPlaybackConnections;
-HICON g_hIconConnected = nullptr;
-HICON g_hIconDisconnected = nullptr;
+std::unordered_map<std::wstring, WorkerProcessInfo> g_workerProcesses;
+uint64_t g_workerEventSerial = 0;
+std::string g_notifyIconSvg;
+HICON g_hTrayIcon = nullptr;
 NOTIFYICONDATAW g_nid = {
 	.cbSize = sizeof(g_nid),
 	.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
@@ -43,6 +52,7 @@ bool g_showNotification = true;
 std::vector<std::wstring> g_lastDevices;
 
 #include "Util.hpp"
+#include "FnvHash.hpp"
 #include "I18n.hpp"
 #include "SettingsUtil.hpp"
 #include "Direct2DSvg.hpp"

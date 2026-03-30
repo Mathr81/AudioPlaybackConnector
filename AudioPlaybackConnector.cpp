@@ -5,13 +5,321 @@
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 void SetupFlyout();
 void SetupMenu();
-winrt::fire_and_forget ConnectDevice(DevicePicker, std::wstring_view);
+winrt::fire_and_forget ConnectDevice(DevicePicker, std::wstring);
 void SetupDevicePicker();
 void SetupSvgIcon();
 void UpdateNotifyIcon();
 bool GetStartupStatus();
 void SetStartupStatus(bool status);
 void ShowInitialToastNotification();
+bool TryGetWorkerDeviceId(std::wstring& deviceId);
+bool TryGetArgValue(PCWSTR name, std::wstring& value);
+int RunWorkerProcess(std::wstring_view deviceId, std::wstring_view stopEventName, std::wstring_view workerAppId);
+bool LaunchWorkerProcess(std::wstring_view deviceId, WorkerProcessInfo& workerInfo);
+void PruneExitedWorkers();
+void RequestStopWorker(WorkerProcessInfo& workerInfo, DWORD waitMs);
+void StopAndCleanupWorker(WorkerProcessInfo& workerInfo);
+fs::path GetWorkerExecutablePath(std::wstring_view deviceId, uint64_t launchId);
+bool EnsureWorkerExecutable(const fs::path& workerExePath);
+std::wstring GetWorkerAppId(std::wstring_view deviceId, uint64_t launchId);
+
+bool IsSystemLightTheme()
+{
+	wil::unique_hkey hKey;
+	if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+	{
+		DWORD value = 1;
+		DWORD size = sizeof(value);
+		DWORD type = REG_DWORD;
+		if (RegQueryValueExW(hKey.get(), L"SystemUsesLightTheme", nullptr, &type, reinterpret_cast<LPBYTE>(&value), &size) == ERROR_SUCCESS && type == REG_DWORD)
+		{
+			return value != 0;
+		}
+	}
+	return false;
+}
+
+HICON CreateNotifyIcon(size_t connectionCount)
+{
+	if (g_notifyIconSvg.empty())
+	{
+		return nullptr;
+	}
+
+	const int width = GetSystemMetrics(SM_CXSMICON);
+	const int height = GetSystemMetrics(SM_CYSMICON);
+	const bool hasConnection = connectionCount > 0;
+	D2D1_COLOR_F baseColor = hasConnection ? D2D1::ColorF(0.0f, 0.47f, 1.0f, 1.0f) : (IsSystemLightTheme() ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f) : D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f));
+
+	wil::unique_hdc hdc(CreateCompatibleDC(nullptr));
+	THROW_IF_NULL_ALLOC(hdc);
+
+	auto hBitmap = CreateDIB(hdc.get(), width, height, 32);
+	THROW_IF_NULL_ALLOC(hBitmap);
+	auto hBitmapMask = CreateDIB(hdc.get(), width, height, 1);
+	THROW_IF_NULL_ALLOC(hBitmapMask);
+
+	auto select = wil::SelectObject(hdc.get(), hBitmap.get());
+	DrawSvgTohDC(g_notifyIconSvg, hdc.get(), width, height, baseColor);
+
+	if (hasConnection)
+	{
+		const int badgeRadius = max(4, width / 4);
+		const int margin = 1;
+		const int cx = width - badgeRadius - margin;
+		const int cy = height - badgeRadius - margin;
+		RECT badgeRect = { cx - badgeRadius, cy - badgeRadius, cx + badgeRadius, cy + badgeRadius };
+
+		wil::unique_hbrush badgeBrush(CreateSolidBrush(RGB(0, 120, 215)));
+		auto oldBrush = SelectObject(hdc.get(), badgeBrush.get());
+		auto oldPen = SelectObject(hdc.get(), GetStockObject(NULL_PEN));
+		Ellipse(hdc.get(), badgeRect.left, badgeRect.top, badgeRect.right, badgeRect.bottom);
+		SelectObject(hdc.get(), oldPen);
+		SelectObject(hdc.get(), oldBrush);
+
+		std::wstring text = connectionCount > 99 ? L"99+" : std::to_wstring(connectionCount);
+		HFONT font = CreateFontW(-MulDiv(7, GetDeviceCaps(hdc.get(), LOGPIXELSY), 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+		if (font)
+		{
+			auto oldFont = SelectObject(hdc.get(), font);
+			SetTextColor(hdc.get(), RGB(255, 255, 255));
+			SetBkMode(hdc.get(), TRANSPARENT);
+			DrawTextW(hdc.get(), text.c_str(), -1, &badgeRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+			SelectObject(hdc.get(), oldFont);
+			DeleteObject(font);
+		}
+
+		DIBSECTION dib = {};
+		if (GetObjectW(hBitmap.get(), sizeof(dib), &dib) == sizeof(dib) && dib.dsBm.bmBits)
+		{
+			auto pixels = static_cast<uint32_t*>(dib.dsBm.bmBits);
+			const int pixelCount = dib.dsBm.bmWidth * abs(dib.dsBm.bmHeight);
+			for (int i = 0; i < pixelCount; ++i)
+			{
+				if ((pixels[i] & 0xFF000000u) == 0 && (pixels[i] & 0x00FFFFFFu) != 0)
+				{
+					pixels[i] |= 0xFF000000u;
+				}
+			}
+		}
+	}
+
+	ICONINFO iconInfo = {
+		.fIcon = TRUE,
+		.hbmMask = hBitmapMask.get(),
+		.hbmColor = hBitmap.get()
+	};
+
+	HICON hIcon = CreateIconIndirect(&iconInfo);
+	THROW_LAST_ERROR_IF_NULL(hIcon);
+	return hIcon;
+}
+
+bool TryGetArgValue(PCWSTR name, std::wstring& value)
+{
+	int argc = 0;
+	auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+	if (!argv)
+	{
+		return false;
+	}
+
+	for (int i = 1; i < argc; ++i)
+	{
+		if (_wcsicmp(argv[i], name) == 0 && i + 1 < argc)
+		{
+			value = argv[i + 1];
+			LocalFree(argv);
+			return true;
+		}
+	}
+
+	LocalFree(argv);
+	return false;
+}
+
+bool TryGetWorkerDeviceId(std::wstring& deviceId)
+{
+	return TryGetArgValue(L"--worker", deviceId);
+}
+
+void RequestStopWorker(WorkerProcessInfo& workerInfo, DWORD waitMs)
+{
+	if (workerInfo.stopEventHandle)
+	{
+		SetEvent(workerInfo.stopEventHandle);
+	}
+	if (workerInfo.processHandle)
+	{
+		if (WaitForSingleObject(workerInfo.processHandle, waitMs) != WAIT_OBJECT_0)
+		{
+			TerminateProcess(workerInfo.processHandle, 0);
+			WaitForSingleObject(workerInfo.processHandle, 200);
+		}
+	}
+}
+
+void StopAndCleanupWorker(WorkerProcessInfo& workerInfo)
+{
+	RequestStopWorker(workerInfo, 2000);
+	if (workerInfo.processHandle)
+	{
+		CloseHandle(workerInfo.processHandle);
+		workerInfo.processHandle = nullptr;
+	}
+	if (workerInfo.stopEventHandle)
+	{
+		CloseHandle(workerInfo.stopEventHandle);
+		workerInfo.stopEventHandle = nullptr;
+	}
+	if (!workerInfo.executablePath.empty())
+	{
+		DeleteFileW(workerInfo.executablePath.c_str());
+		workerInfo.executablePath.clear();
+	}
+}
+
+int RunWorkerProcess(std::wstring_view deviceId, std::wstring_view stopEventName, std::wstring_view workerAppId)
+{
+	try
+	{
+		if (!workerAppId.empty())
+		{
+			SetCurrentProcessExplicitAppUserModelID(std::wstring(workerAppId).c_str());
+		}
+
+		winrt::init_apartment();
+
+		auto connection = AudioPlaybackConnection::TryCreateFromId(deviceId);
+		if (!connection)
+		{
+			return EXIT_FAILURE;
+		}
+
+		auto hClosed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		if (!hClosed)
+		{
+			return EXIT_FAILURE;
+		}
+
+		HANDLE hStop = OpenEventW(SYNCHRONIZE, FALSE, std::wstring(stopEventName).c_str());
+		if (!hStop)
+		{
+			CloseHandle(hClosed);
+			return EXIT_FAILURE;
+		}
+
+		connection.StateChanged([hClosed](const auto& sender, const auto&) {
+			if (sender.State() == AudioPlaybackConnectionState::Closed)
+			{
+				SetEvent(hClosed);
+			}
+		});
+
+		connection.StartAsync().get();
+		auto result = connection.OpenAsync().get();
+		if (result.Status() != AudioPlaybackConnectionOpenResultStatus::Success)
+		{
+			CloseHandle(hStop);
+			CloseHandle(hClosed);
+			return EXIT_FAILURE;
+		}
+
+		HANDLE handles[2] = { hClosed, hStop };
+		auto waitResult = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+		if (waitResult == WAIT_OBJECT_0 + 1)
+		{
+			// Stop requested: exit worker and let process teardown release this connection only.
+		}
+
+		CloseHandle(hStop);
+		CloseHandle(hClosed);
+	}
+	catch (winrt::hresult_error const&)
+	{
+		LOG_CAUGHT_EXCEPTION();
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
+}
+
+bool LaunchWorkerProcess(std::wstring_view deviceId, WorkerProcessInfo& workerInfo)
+{
+	const uint64_t launchId = ++g_workerEventSerial;
+	auto workerExePath = GetWorkerExecutablePath(deviceId, launchId);
+	if (!EnsureWorkerExecutable(workerExePath))
+	{
+		return false;
+	}
+
+	std::wstring stopEventName = L"Local\\AudioPlaybackConnector_WorkerStop_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(launchId);
+	std::wstring workerAppId = GetWorkerAppId(deviceId, launchId);
+
+	workerInfo.stopEventHandle = CreateEventW(nullptr, TRUE, FALSE, stopEventName.c_str());
+	if (!workerInfo.stopEventHandle)
+	{
+		LOG_LAST_ERROR();
+		return false;
+	}
+
+	std::wstring commandLine = L"\"" + workerExePath.wstring() + L"\" --worker \"" + std::wstring(deviceId) + L"\" --stopEvent \"" + stopEventName + L"\" --appId \"" + workerAppId + L"\"";
+
+	STARTUPINFOW startupInfo = { sizeof(startupInfo) };
+	PROCESS_INFORMATION processInfo = {};
+	if (!CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startupInfo, &processInfo))
+	{
+		LOG_LAST_ERROR();
+		CloseHandle(workerInfo.stopEventHandle);
+		workerInfo.stopEventHandle = nullptr;
+		return false;
+	}
+
+	CloseHandle(processInfo.hThread);
+	workerInfo.processHandle = processInfo.hProcess;
+	workerInfo.executablePath = workerExePath;
+	return true;
+}
+
+void PruneExitedWorkers()
+{
+	for (auto it = g_workerProcesses.begin(); it != g_workerProcesses.end();)
+	{
+		if (WaitForSingleObject(it->second.processHandle, 0) == WAIT_OBJECT_0)
+		{
+			if (it->second.processHandle)
+			{
+				CloseHandle(it->second.processHandle);
+			}
+			if (it->second.stopEventHandle)
+			{
+				CloseHandle(it->second.stopEventHandle);
+			}
+			if (!it->second.executablePath.empty())
+			{
+				DeleteFileW(it->second.executablePath.c_str());
+			}
+			auto connectionIt = g_audioPlaybackConnections.find(it->first);
+			if (connectionIt != g_audioPlaybackConnections.end())
+			{
+				try
+				{
+					g_devicePicker.SetDisplayStatus(connectionIt->second.first, {}, DevicePickerDisplayStatusOptions::None);
+				}
+				catch (winrt::hresult_error const&)
+				{
+					LOG_CAUGHT_EXCEPTION();
+				}
+				g_audioPlaybackConnections.erase(connectionIt);
+			}
+			it = g_workerProcesses.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+}
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	_In_opt_ HINSTANCE hPrevInstance,
@@ -21,6 +329,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(lpCmdLine);
 	UNREFERENCED_PARAMETER(nCmdShow);
+
+	std::wstring workerDeviceId;
+	if (TryGetWorkerDeviceId(workerDeviceId))
+	{
+		std::wstring stopEventName;
+		if (!TryGetArgValue(L"--stopEvent", stopEventName))
+		{
+			return EXIT_FAILURE;
+		}
+	 std::wstring workerAppId;
+		if (!TryGetArgValue(L"--appId", workerAppId))
+		{
+			return EXIT_FAILURE;
+		}
+		return RunWorkerProcess(workerDeviceId, stopEventName, workerAppId);
+	}
 
 	// Prevent multiple instances
 	g_hMutex = CreateMutexW(nullptr, FALSE, L"Local\\AudioPlaybackConnector_Mutex");
@@ -83,6 +407,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	g_xamlCanvas = Canvas();
 	desktopSource.Content(g_xamlCanvas);
 
+	LoadTranslateData();
 	LoadSettings();
 	SetupFlyout();
 	SetupMenu();
@@ -125,9 +450,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	case WM_DESTROY:
 		for (const auto& connection : g_audioPlaybackConnections)
 		{
-			connection.second.second.Close();
+			if (connection.second.second)
+			{
+				connection.second.second.Close();
+			}
 			g_devicePicker.SetDisplayStatus(connection.second.first, {}, DevicePickerDisplayStatusOptions::None);
 		}
+		for (auto& worker : g_workerProcesses)
+		{
+			StopAndCleanupWorker(worker.second);
+		}
+		g_workerProcesses.clear();
 		if (g_reconnect)
 		{
 			SaveSettings();
@@ -139,8 +472,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			SaveSettings();
 		}
 		Shell_NotifyIconW(NIM_DELETE, &g_nid);
-		if (g_hIconConnected) { DestroyIcon(g_hIconConnected); g_hIconConnected = nullptr; }
-		if (g_hIconDisconnected) { DestroyIcon(g_hIconDisconnected); g_hIconDisconnected = nullptr; }
+		if (g_hTrayIcon) { DestroyIcon(g_hTrayIcon); g_hTrayIcon = nullptr; }
 		if (g_hMutex) { CloseHandle(g_hMutex); g_hMutex = nullptr; }
 		PostQuitMessage(0);
 		break;
@@ -156,6 +488,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		case NIN_SELECT:
 		case NIN_KEYSELECT:
 		{
+			PruneExitedWorkers();
 			using namespace winrt::Windows::UI::Popups;
 
 			RECT iconRect;
@@ -202,6 +535,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		break;
 		}
 		break;
+	case WM_CONNECTIONCLOSED:
+	{
+		auto pDeviceId = std::unique_ptr<std::wstring>(reinterpret_cast<std::wstring*>(wParam));
+		auto it = g_audioPlaybackConnections.find(*pDeviceId);
+		if (it != g_audioPlaybackConnections.end())
+		{
+			g_devicePicker.SetDisplayStatus(it->second.first, {}, DevicePickerDisplayStatusOptions::None);
+			g_audioPlaybackConnections.erase(it);
+		}
+		UpdateNotifyIcon();
+	}
+	break;
 	case WM_CONNECTDEVICE:
 		if (g_reconnect)
 		{
@@ -364,100 +709,39 @@ void SetupMenu()
 
 winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation device)
 {
-	picker.SetDisplayStatus(device, _(L"Connecting"), DevicePickerDisplayStatusOptions::ShowProgress | DevicePickerDisplayStatusOptions::ShowDisconnectButton);
-
-	bool success = false;
-	std::wstring errorMessage;
-
 	try
 	{
-		auto connection = AudioPlaybackConnection::TryCreateFromId(device.Id());
-		if (connection)
+		PruneExitedWorkers();
+
+		auto deviceId = std::wstring(device.Id());
+		auto existing = g_audioPlaybackConnections.find(deviceId);
+		if (existing != g_audioPlaybackConnections.end())
 		{
-			g_audioPlaybackConnections.emplace(device.Id(), std::pair(device, connection));
-
-			connection.StateChanged([](const auto& sender, const auto&) {
-				if (sender.State() == AudioPlaybackConnectionState::Closed)
-				{
-					auto it = g_audioPlaybackConnections.find(std::wstring(sender.DeviceId()));
-					if (it != g_audioPlaybackConnections.end())
-					{
-						g_devicePicker.SetDisplayStatus(it->second.first, {}, DevicePickerDisplayStatusOptions::None);
-						g_audioPlaybackConnections.erase(it);
-					}
-					// Note: sender.Close() removed here as it's already closed when state is Closed
-					// Calling Close() again could cause issues. Cleanup happens via erase above.
-					UpdateNotifyIcon();
-				}
-			});
-
-			co_await connection.StartAsync();
-			auto result = co_await connection.OpenAsync();
-
-			switch (result.Status())
-			{
-			case AudioPlaybackConnectionOpenResultStatus::Success:
-				success = true;
-				break;
-			case AudioPlaybackConnectionOpenResultStatus::RequestTimedOut:
-				success = false;
-				errorMessage = _(L"The request timed out");
-				break;
-			case AudioPlaybackConnectionOpenResultStatus::DeniedBySystem:
-				success = false;
-				errorMessage = _(L"The operation was denied by the system");
-				break;
-			case AudioPlaybackConnectionOpenResultStatus::UnknownFailure:
-				success = false;
-				winrt::throw_hresult(result.ExtendedError());
-				break;
-			}
+			picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
+			co_return;
 		}
-		else
+
+		picker.SetDisplayStatus(device, _(L"Connecting"), DevicePickerDisplayStatusOptions::ShowProgress | DevicePickerDisplayStatusOptions::ShowDisconnectButton);
+
+		WorkerProcessInfo workerInfo;
+		if (!LaunchWorkerProcess(deviceId, workerInfo))
 		{
-			success = false;
-			errorMessage = _(L"Unknown error");
+			picker.SetDisplayStatus(device, _(L"Unknown error"), DevicePickerDisplayStatusOptions::ShowRetryButton);
+			co_return;
 		}
-	}
-	catch (winrt::hresult_error const& ex)
-	{
-		success = false;
-		errorMessage.resize(64);
-		while (1)
-		{
-			auto result = swprintf(errorMessage.data(), errorMessage.size(), L"%s (0x%08X)", ex.message().c_str(), static_cast<uint32_t>(ex.code()));
-			if (result < 0)
-			{
-				errorMessage.resize(errorMessage.size() * 2);
-			}
-			else
-			{
-				errorMessage.resize(result);
-				break;
-			}
-		}
-		LOG_CAUGHT_EXCEPTION();
-	}
 
-	if (success)
-	{
+		g_workerProcesses.emplace(deviceId, workerInfo);
+		g_audioPlaybackConnections.emplace(deviceId, std::pair(device, AudioPlaybackConnection{ nullptr }));
 		picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
 		UpdateNotifyIcon();
 	}
-	else
+	catch (winrt::hresult_error const&)
 	{
-		auto it = g_audioPlaybackConnections.find(std::wstring(device.Id()));
-		if (it != g_audioPlaybackConnections.end())
-		{
-			it->second.second.Close();
-			g_audioPlaybackConnections.erase(it);
-		}
-		picker.SetDisplayStatus(device, errorMessage, DevicePickerDisplayStatusOptions::ShowRetryButton);
-		UpdateNotifyIcon();
+		LOG_CAUGHT_EXCEPTION();
 	}
 }
 
-winrt::fire_and_forget ConnectDevice(DevicePicker picker, std::wstring_view deviceId)
+winrt::fire_and_forget ConnectDevice(DevicePicker picker, std::wstring deviceId)
 {
 	auto device = co_await DeviceInformation::CreateFromIdAsync(deviceId);
 	ConnectDevice(picker, device);
@@ -477,13 +761,36 @@ void SetupDevicePicker()
 	});
 	g_devicePicker.DisconnectButtonClicked([](const auto& sender, const auto& args) {
 		auto device = args.Device();
-		auto it = g_audioPlaybackConnections.find(std::wstring(device.Id()));
-		if (it != g_audioPlaybackConnections.end())
+		auto deviceId = std::wstring(device.Id());
+
+		std::vector<DeviceInformation> reconnectDevices;
+		reconnectDevices.reserve(g_audioPlaybackConnections.size());
+		for (const auto& item : g_audioPlaybackConnections)
 		{
-			it->second.second.Close();
-			g_audioPlaybackConnections.erase(it);
+			if (item.first != deviceId)
+			{
+				reconnectDevices.push_back(item.second.first);
+			}
 		}
+
+		for (auto& worker : g_workerProcesses)
+		{
+			StopAndCleanupWorker(worker.second);
+		}
+		g_workerProcesses.clear();
+
+		for (const auto& item : g_audioPlaybackConnections)
+		{
+			sender.SetDisplayStatus(item.second.first, {}, DevicePickerDisplayStatusOptions::None);
+		}
+		g_audioPlaybackConnections.clear();
 		sender.SetDisplayStatus(device, {}, DevicePickerDisplayStatusOptions::None);
+
+		for (const auto& reconnectDevice : reconnectDevices)
+		{
+			ConnectDevice(sender, reconnectDevice);
+		}
+
 		UpdateNotifyIcon();
 	});
 }
@@ -502,18 +809,23 @@ void SetupSvgIcon()
 	auto svgData = reinterpret_cast<const char*>(LockResource(hResData));
 	FAIL_FAST_IF_NULL_ALLOC(svgData);
 
-	const std::string_view svg(svgData, size);
-	const int width = GetSystemMetrics(SM_CXSMICON), height = GetSystemMetrics(SM_CYSMICON);
-
-	// Create green icon for connected state and red icon for disconnected state
-	g_hIconConnected = SvgTohIcon(svg, width, height, { 0.0f, 1.0f, 0.0f, 1.0f });
-	g_hIconDisconnected = SvgTohIcon(svg, width, height, { 1.0f, 0.0f, 0.0f, 1.0f });
+	g_notifyIconSvg.assign(svgData, size);
 }
 
 void UpdateNotifyIcon()
 {
-	// Set icon based on connection state: green if any connection exists, red otherwise
-	g_nid.hIcon = !g_audioPlaybackConnections.empty() ? g_hIconConnected : g_hIconDisconnected;
+	PruneExitedWorkers();
+
+	auto icon = CreateNotifyIcon(g_audioPlaybackConnections.size());
+	if (icon)
+	{
+		if (g_hTrayIcon)
+		{
+			DestroyIcon(g_hTrayIcon);
+		}
+		g_hTrayIcon = icon;
+		g_nid.hIcon = g_hTrayIcon;
+	}
 
 	if (!Shell_NotifyIconW(NIM_MODIFY, &g_nid))
 	{
@@ -532,15 +844,13 @@ bool GetStartupStatus()
 {
 	auto exePath = GetModuleFsPath(g_hInst);
 
-	HKEY hKey;
+	wil::unique_hkey hKey;
 	if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
 	{
 		wchar_t storedPath[MAX_PATH] = { 0 };
 		DWORD pathLength = sizeof(storedPath);
 		DWORD type = REG_SZ;
-		LSTATUS result = RegQueryValueExW(hKey, L"AudioPlaybackConnector", 0, &type, (LPBYTE)storedPath, &pathLength);
-
-		RegCloseKey(hKey);
+		LSTATUS result = RegQueryValueExW(hKey.get(), L"AudioPlaybackConnector", 0, &type, (LPBYTE)storedPath, &pathLength);
 
 		if (result == ERROR_SUCCESS && type == REG_SZ && exePath == storedPath)
 		{
@@ -555,25 +865,18 @@ void SetStartupStatus(bool status)
 {
 	auto exePath = GetModuleFsPath(g_hInst);
 
-	HKEY hKey;
+	wil::unique_hkey hKey;
 	if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_WRITE, &hKey) == ERROR_SUCCESS)
 	{
 		if (status)
 		{
 			auto exePathStr = exePath.wstring();
-			LSTATUS stat = RegSetValueExW(hKey, L"AudioPlaybackConnector", 0, REG_SZ, (LPBYTE)exePathStr.c_str(), (lstrlenW(exePathStr.c_str()) + 1) * sizeof(wchar_t));
-			if (stat != ERROR_SUCCESS)
-			{
-				RegCloseKey(hKey);
-				return;
-			}
+			LOG_IF_WIN32_ERROR(RegSetValueExW(hKey.get(), L"AudioPlaybackConnector", 0, REG_SZ, (LPBYTE)exePathStr.c_str(), (lstrlenW(exePathStr.c_str()) + 1) * sizeof(wchar_t)));
 		}
 		else
 		{
-			LOG_IF_WIN32_ERROR(RegDeleteValueW(hKey, L"AudioPlaybackConnector"));
+			LOG_IF_WIN32_ERROR(RegDeleteValueW(hKey.get(), L"AudioPlaybackConnector"));
 		}
-
-		RegCloseKey(hKey);
 	}
 }
 
@@ -639,4 +942,45 @@ void ShowInitialToastNotification()
 	{
 		// Silently ignore standard exceptions from toast notification - this is not critical functionality
 	}
+}
+
+fs::path GetWorkerExecutablePath(std::wstring_view deviceId, uint64_t launchId)
+{
+	auto baseDir = GetModuleFsPath(g_hInst).remove_filename();
+	auto workersDir = baseDir / L"workers";
+	std::wstring id(deviceId);
+	auto hash = fnv1a_32(id.data(), id.size() * sizeof(wchar_t));
+	wchar_t fileName[96] = {};
+	swprintf_s(fileName, L"AudioPlaybackConnectorWorker_%08X_%llu.exe", hash, static_cast<unsigned long long>(launchId));
+	return workersDir / fileName;
+}
+
+bool EnsureWorkerExecutable(const fs::path& workerExePath)
+{
+	try
+	{
+		fs::create_directories(workerExePath.parent_path());
+
+		auto sourceExe = GetModuleFsPath(g_hInst);
+		if (!CopyFileW(sourceExe.c_str(), workerExePath.c_str(), FALSE))
+		{
+			LOG_LAST_ERROR();
+			return false;
+		}
+		return true;
+	}
+	catch (...)
+	{
+		LOG_CAUGHT_EXCEPTION();
+		return false;
+	}
+}
+
+std::wstring GetWorkerAppId(std::wstring_view deviceId, uint64_t launchId)
+{
+	std::wstring id(deviceId);
+	auto hash = fnv1a_32(id.data(), id.size() * sizeof(wchar_t));
+	wchar_t appId[128] = {};
+	swprintf_s(appId, L"AudioPlaybackConnector.Worker.%08X.%llu", hash, static_cast<unsigned long long>(launchId));
+	return appId;
 }
