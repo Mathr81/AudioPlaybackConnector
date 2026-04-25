@@ -622,7 +622,6 @@ void SetupFlyout()
 
 void SetupOutputDeviceMenu(MenuFlyoutSubItem subItem)
 {
-	subItem.Items().Clear();
 	auto devices = EnumerateAudioRenderDevices();
 
 	FontIcon checkedIcon;
@@ -630,9 +629,7 @@ void SetupOutputDeviceMenu(MenuFlyoutSubItem subItem)
 
 	MenuFlyoutItem defaultItem;
 	defaultItem.Text(_(L"System Default"));
-	if (g_outputDeviceId.empty()) {
-		defaultItem.Icon(checkedIcon);
-	}
+	defaultItem.Tag(winrt::box_value(L"default"));
 	defaultItem.Click([](const auto&, const auto&) {
 		g_outputDeviceId.clear();
 		SaveSettings();
@@ -646,9 +643,7 @@ void SetupOutputDeviceMenu(MenuFlyoutSubItem subItem)
 	for (const auto& dev : devices) {
 		MenuFlyoutItem item;
 		item.Text(dev.name);
-		if (g_outputDeviceId == dev.id) {
-			item.Icon(checkedIcon);
-		}
+		item.Tag(winrt::box_value(dev.id));
 		item.Click([id = dev.id](const auto&, const auto&) {
 			g_outputDeviceId = id;
 			SaveSettings();
@@ -658,6 +653,26 @@ void SetupOutputDeviceMenu(MenuFlyoutSubItem subItem)
 			}
 		});
 		subItem.Items().Append(item);
+	}
+}
+
+void UpdateOutputDeviceMenuIcons(MenuFlyoutSubItem subItem)
+{
+	FontIcon checkedIcon;
+	checkedIcon.Glyph(L"\xE73E");
+
+	for (auto const& itemBase : subItem.Items())
+	{
+		auto item = itemBase.as<MenuFlyoutItem>();
+		auto tag = winrt::unbox_value<std::wstring>(item.Tag());
+		if ((g_outputDeviceId.empty() && tag == L"default") || (g_outputDeviceId == tag))
+		{
+			item.Icon(checkedIcon);
+		}
+		else
+		{
+			item.Icon(nullptr);
+		}
 	}
 }
 
@@ -750,6 +765,7 @@ void SetupMenu()
 	MenuFlyoutSubItem outputDeviceItem;
 	outputDeviceItem.Text(_(L"Output Device"));
 	outputDeviceItem.Icon(speakerIcon);
+	SetupOutputDeviceMenu(outputDeviceItem);
 
 	MenuFlyoutItem soundSettingsItem;
 	soundSettingsItem.Text(_(L"Open Sound Settings"));
@@ -799,7 +815,7 @@ void SetupMenu()
 	menu.Items().Append(lowLatencyItem);
 	menu.Items().Append(exitItem);
 	menu.Opened([outputDeviceItem](const auto& sender, const auto&) {
-		SetupOutputDeviceMenu(outputDeviceItem);
+		UpdateOutputDeviceMenuIcons(outputDeviceItem);
 		auto menuItems = sender.as<MenuFlyout>().Items();
 		auto itemsCount = menuItems.Size();
 		if (itemsCount > 0)
