@@ -5,6 +5,13 @@
 #include <AudioClient.h>
 #include <mmreg.h>
 
+// Explicitly define DeviceShareMode for IPolicyConfig
+enum DeviceShareMode
+{
+    DeviceShareModeShared,
+    DeviceShareModeExclusive
+};
+
 // Undocumented IPolicyConfig10 interface
 // Using ::IUnknown to avoid ambiguity with winrt::Windows::Foundation::IUnknown
 MIDL_INTERFACE("CA286FC3-91FD-42C3-8E9B-CAAFA66242E3")
