@@ -2,10 +2,13 @@
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <Functiondiscoverykeys_devpkey.h>
+#include <AudioClient.h>
+#include <mmreg.h>
 
 // Undocumented IPolicyConfig10 interface
+// Using ::IUnknown to avoid ambiguity with winrt::Windows::Foundation::IUnknown
 MIDL_INTERFACE("CA286FC3-91FD-42C3-8E9B-CAAFA66242E3")
-IPolicyConfig10 : public IUnknown {
+IPolicyConfig10 : public ::IUnknown {
 public:
     virtual HRESULT STDMETHODCALLTYPE GetMixFormat(PCWSTR, WAVEFORMATEX**) = 0;
     virtual HRESULT STDMETHODCALLTYPE GetDeviceFormat(PCWSTR, INT, WAVEFORMATEX**) = 0;
@@ -21,19 +24,27 @@ public:
     virtual HRESULT STDMETHODCALLTYPE SetAppDefaultEndpoint(PCWSTR wszAppPath, ERole eRole, PCWSTR wszDeviceId) = 0;
 };
 
+// GUID for CPolicyConfigClient
+class __declspec(uuid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")) CPolicyConfigClient;
+
 inline HRESULT SetAppOutputDevice(const std::wstring& appPath, const std::wstring& deviceId)
 {
     if (deviceId.empty()) return S_OK;
 
-    wil::com_ptr<IPolicyConfig10> policyConfig;
-    HRESULT hr = CoCreateInstance(__uuidof(CPolicyConfigClient), nullptr, CLSCTX_ALL, __uuidof(IPolicyConfig10), policyConfig.put_void());
-    if (FAILED(hr)) return hr;
+    try {
+        wil::com_ptr<IPolicyConfig10> policyConfig;
+        HRESULT hr = CoCreateInstance(__uuidof(CPolicyConfigClient), nullptr, CLSCTX_ALL, __uuidof(IPolicyConfig10), policyConfig.put_void());
+        if (FAILED(hr)) return hr;
 
-    hr = policyConfig->SetAppDefaultEndpoint(appPath.c_str(), eConsole, deviceId.c_str());
-    if (FAILED(hr)) return hr;
+        hr = policyConfig->SetAppDefaultEndpoint(appPath.c_str(), eConsole, deviceId.c_str());
+        if (FAILED(hr)) return hr;
 
-    hr = policyConfig->SetAppDefaultEndpoint(appPath.c_str(), eMultimedia, deviceId.c_str());
-    return hr;
+        hr = policyConfig->SetAppDefaultEndpoint(appPath.c_str(), eMultimedia, deviceId.c_str());
+        return hr;
+    }
+    catch (...) {
+        return E_FAIL;
+    }
 }
 
 struct AudioDeviceDetails {
@@ -67,7 +78,9 @@ inline std::vector<AudioDeviceDetails> EnumerateAudioRenderDevices()
             wil::unique_prop_variant nameVar;
             THROW_IF_FAILED(properties->GetValue(PKEY_Device_FriendlyName, &nameVar));
 
-            devices.push_back({ id.get(), nameVar.pwszVal });
+            if (nameVar.vt == VT_LPWSTR) {
+                devices.push_back({ id.get(), nameVar.pwszVal });
+            }
         }
     }
     CATCH_LOG();

@@ -34,7 +34,7 @@ void LoadSettings()
 		}
 
 		std::wstring utf16 = Utf8ToUtf16(string);
-		auto jsonObj = JsonObject::Parse(utf16);
+		auto jsonObj = winrt::Windows::Data::Json::JsonObject::Parse(utf16);
 		g_reconnect = jsonObj.Lookup(L"reconnect").GetBoolean();
 		
 		if (jsonObj.HasKey(L"showNotification"))
@@ -50,27 +50,30 @@ void LoadSettings()
 		g_lastDevices.reserve(lastDevices.Size());
 		for (const auto& i : lastDevices)
 		{
-			if (i.ValueType() == JsonValueType::String)
+			if (i.ValueType() == winrt::Windows::Data::Json::JsonValueType::String)
 				g_lastDevices.push_back(std::wstring(i.GetString()));
 		}
 	}
-	CATCH_LOG();
+	catch (...)
+	{
+		// Fallback to default settings
+	}
 }
 
 void SaveSettings()
 {
 	try
 	{
-		JsonObject jsonObj;
-		jsonObj.Insert(L"reconnect", JsonValue::CreateBooleanValue(g_reconnect));
-		jsonObj.Insert(L"showNotification", JsonValue::CreateBooleanValue(g_showNotification));
-		jsonObj.Insert(L"lowLatency", JsonValue::CreateBooleanValue(g_lowLatency));
-		jsonObj.Insert(L"outputDeviceId", JsonValue::CreateStringValue(g_outputDeviceId));
+		winrt::Windows::Data::Json::JsonObject jsonObj;
+		jsonObj.Insert(L"reconnect", winrt::Windows::Data::Json::JsonValue::CreateBooleanValue(g_reconnect));
+		jsonObj.Insert(L"showNotification", winrt::Windows::Data::Json::JsonValue::CreateBooleanValue(g_showNotification));
+		jsonObj.Insert(L"lowLatency", winrt::Windows::Data::Json::JsonValue::CreateBooleanValue(g_lowLatency));
+		jsonObj.Insert(L"outputDeviceId", winrt::Windows::Data::Json::JsonValue::CreateStringValue(g_outputDeviceId));
 
-		JsonArray lastDevices;
+		winrt::Windows::Data::Json::JsonArray lastDevices;
 		for (const auto& i : g_audioPlaybackConnections)
 		{
-			lastDevices.Append(JsonValue::CreateStringValue(i.first));
+			lastDevices.Append(winrt::Windows::Data::Json::JsonValue::CreateStringValue(i.first));
 		}
 		jsonObj.Insert(L"lastDevices", lastDevices);
 
@@ -82,5 +85,8 @@ void SaveSettings()
 		THROW_IF_WIN32_BOOL_FALSE(WriteFile(hFile.get(), utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr));
 		THROW_HR_IF(E_FAIL, written != utf8.size());
 	}
-	CATCH_LOG();
+	catch (...)
+	{
+		// Ignore save errors
+	}
 }

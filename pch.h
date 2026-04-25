@@ -44,6 +44,7 @@
 
 #include <wil/common.h>
 #include <wil/result.h>
+#include <wil/com.h>
 #include <wil/cppwinrt.h>
 
 // C++/WinRT

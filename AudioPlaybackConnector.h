@@ -2,15 +2,6 @@
 
 #include "resource.h"
 
-using namespace winrt::Windows::Data::Json;
-using namespace winrt::Windows::Devices::Enumeration;
-using namespace winrt::Windows::Foundation;
-using namespace winrt::Windows::Media::Audio;
-using namespace winrt::Windows::UI::Xaml;
-using namespace winrt::Windows::UI::Xaml::Controls;
-using namespace winrt::Windows::UI::Xaml::Hosting;
-using namespace winrt::Windows::UI::Notifications;
-using namespace winrt::Windows::Data::Xml::Dom;
 namespace fs = std::filesystem;
 
 constexpr UINT WM_NOTIFYICON = WM_APP + 1;
@@ -21,18 +12,18 @@ HANDLE g_hMutex = nullptr;
 HINSTANCE g_hInst;
 HWND g_hWnd;
 HWND g_hWndXaml;
-Canvas g_xamlCanvas = nullptr;
-Flyout g_xamlFlyout = nullptr;
-MenuFlyout g_xamlMenu = nullptr;
-FocusState g_menuFocusState = FocusState::Unfocused;
-DevicePicker g_devicePicker = nullptr;
+winrt::Windows::UI::Xaml::Controls::Canvas g_xamlCanvas = nullptr;
+winrt::Windows::UI::Xaml::Controls::Flyout g_xamlFlyout = nullptr;
+winrt::Windows::UI::Xaml::Controls::MenuFlyout g_xamlMenu = nullptr;
+winrt::Windows::UI::Xaml::FocusState g_menuFocusState = winrt::Windows::UI::Xaml::FocusState::Unfocused;
+winrt::Windows::Devices::Enumeration::DevicePicker g_devicePicker = nullptr;
 struct WorkerProcessInfo
 {
 	HANDLE processHandle = nullptr;
 	HANDLE stopEventHandle = nullptr;
 	fs::path executablePath;
 };
-std::unordered_map<std::wstring, std::pair<DeviceInformation, AudioPlaybackConnection>> g_audioPlaybackConnections;
+std::unordered_map<std::wstring, std::pair<winrt::Windows::Devices::Enumeration::DeviceInformation, winrt::Windows::Media::Audio::AudioPlaybackConnection>> g_audioPlaybackConnections;
 std::unordered_map<std::wstring, WorkerProcessInfo> g_workerProcesses;
 uint64_t g_workerEventSerial = 0;
 std::string g_notifyIconSvg;

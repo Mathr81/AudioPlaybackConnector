@@ -3,6 +3,16 @@
 #include "AudioPlaybackConnector.h"
 #include "AudioUtil.hpp"
 
+using namespace winrt::Windows::Data::Json;
+using namespace winrt::Windows::Devices::Enumeration;
+using namespace winrt::Windows::Foundation;
+using namespace winrt::Windows::Media::Audio;
+using namespace winrt::Windows::UI::Xaml;
+using namespace winrt::Windows::UI::Xaml::Controls;
+using namespace winrt::Windows::UI::Xaml::Hosting;
+using namespace winrt::Windows::UI::Notifications;
+using namespace winrt::Windows::Data::Xml::Dom;
+
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 // ... (rest of function declarations)
 void SetupFlyout();
