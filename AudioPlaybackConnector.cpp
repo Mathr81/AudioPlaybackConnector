@@ -1,8 +1,10 @@
 #pragma warning(disable:4819)
 #include "pch.h"
 #include "AudioPlaybackConnector.h"
+#include "AudioUtil.hpp"
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+// ... (rest of function declarations)
 void SetupFlyout();
 void SetupMenu();
 winrt::fire_and_forget ConnectDevice(DevicePicker, std::wstring);
@@ -278,6 +280,17 @@ bool LaunchWorkerProcess(std::wstring_view deviceId, WorkerProcessInfo& workerIn
 	CloseHandle(processInfo.hThread);
 	workerInfo.processHandle = processInfo.hProcess;
 	workerInfo.executablePath = workerExePath;
+
+	if (!g_outputDeviceId.empty())
+	{
+		SetAppOutputDevice(workerExePath.wstring(), g_outputDeviceId);
+	}
+
+	if (g_lowLatency)
+	{
+		SetPriorityClass(processInfo.hProcess, HIGH_PRIORITY_CLASS);
+	}
+
 	return true;
 }
 
@@ -597,6 +610,47 @@ void SetupFlyout()
 	g_xamlFlyout = flyout;
 }
 
+void SetupOutputDeviceMenu(MenuFlyoutSubItem subItem)
+{
+	subItem.Items().Clear();
+	auto devices = EnumerateAudioRenderDevices();
+
+	FontIcon checkedIcon;
+	checkedIcon.Glyph(L"\xE73E");
+
+	MenuFlyoutItem defaultItem;
+	defaultItem.Text(_(L"System Default"));
+	if (g_outputDeviceId.empty()) {
+		defaultItem.Icon(checkedIcon);
+	}
+	defaultItem.Click([](const auto&, const auto&) {
+		g_outputDeviceId.clear();
+		SaveSettings();
+		for (auto& worker : g_workerProcesses)
+		{
+			SetAppOutputDevice(worker.second.executablePath.wstring(), L"");
+		}
+	});
+	subItem.Items().Append(defaultItem);
+
+	for (const auto& dev : devices) {
+		MenuFlyoutItem item;
+		item.Text(dev.name);
+		if (g_outputDeviceId == dev.id) {
+			item.Icon(checkedIcon);
+		}
+		item.Click([id = dev.id](const auto&, const auto&) {
+			g_outputDeviceId = id;
+			SaveSettings();
+			for (auto& worker : g_workerProcesses)
+			{
+				SetAppOutputDevice(worker.second.executablePath.wstring(), g_outputDeviceId);
+			}
+		});
+		subItem.Items().Append(item);
+	}
+}
+
 void SetupMenu()
 {
 	// https://docs.microsoft.com/en-us/windows/uwp/design/style/segoe-ui-symbol-font
@@ -656,6 +710,46 @@ void SetupMenu()
 		SaveSettings();
 	});
 
+	MenuFlyoutItem lowLatencyItem;
+	lowLatencyItem.Text(_(L"Low Latency Mode"));
+	if (g_lowLatency) {
+		lowLatencyItem.Icon(checkedIcon);
+	}
+	else {
+		lowLatencyItem.Icon(uncheckedIcon);
+	}
+	lowLatencyItem.Click([checkedIcon, uncheckedIcon](const auto& sender, const auto&) {
+		MenuFlyoutItem self = sender.as<MenuFlyoutItem>();
+		g_lowLatency = !g_lowLatency;
+		if (g_lowLatency) {
+			self.Icon(checkedIcon);
+		}
+		else {
+			self.Icon(uncheckedIcon);
+		}
+		SaveSettings();
+		for (auto& worker : g_workerProcesses)
+		{
+			SetPriorityClass(worker.second.processHandle, g_lowLatency ? HIGH_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS);
+		}
+	});
+
+	FontIcon speakerIcon;
+	speakerIcon.Glyph(L"\xE767");
+
+	MenuFlyoutSubItem outputDeviceItem;
+	outputDeviceItem.Text(_(L"Output Device"));
+	outputDeviceItem.Icon(speakerIcon);
+
+	MenuFlyoutItem soundSettingsItem;
+	soundSettingsItem.Text(_(L"Open Sound Settings"));
+	FontIcon volumeIcon;
+	volumeIcon.Glyph(L"\xE767");
+	soundSettingsItem.Icon(volumeIcon);
+	soundSettingsItem.Click([](const auto&, const auto&) {
+		winrt::Windows::System::Launcher::LaunchUriAsync(Uri(L"ms-settings:sound"));
+	});
+
 	FontIcon closeIcon;
 	closeIcon.Glyph(L"\xE8BB");
 
@@ -688,10 +782,14 @@ void SetupMenu()
 
 	MenuFlyout menu;
 	menu.Items().Append(settingsItem);
+	menu.Items().Append(soundSettingsItem);
+	menu.Items().Append(outputDeviceItem);
 	menu.Items().Append(startupItem);
 	menu.Items().Append(notificationItem);
+	menu.Items().Append(lowLatencyItem);
 	menu.Items().Append(exitItem);
-	menu.Opened([](const auto& sender, const auto&) {
+	menu.Opened([outputDeviceItem](const auto& sender, const auto&) {
+		SetupOutputDeviceMenu(outputDeviceItem);
 		auto menuItems = sender.as<MenuFlyout>().Items();
 		auto itemsCount = menuItems.Size();
 		if (itemsCount > 0)
@@ -763,32 +861,18 @@ void SetupDevicePicker()
 		auto device = args.Device();
 		auto deviceId = std::wstring(device.Id());
 
-		std::vector<DeviceInformation> reconnectDevices;
-		reconnectDevices.reserve(g_audioPlaybackConnections.size());
-		for (const auto& item : g_audioPlaybackConnections)
+		auto it = g_workerProcesses.find(deviceId);
+		if (it != g_workerProcesses.end())
 		{
-			if (item.first != deviceId)
-			{
-				reconnectDevices.push_back(item.second.first);
-			}
+			StopAndCleanupWorker(it->second);
+			g_workerProcesses.erase(it);
 		}
 
-		for (auto& worker : g_workerProcesses)
+		auto itConn = g_audioPlaybackConnections.find(deviceId);
+		if (itConn != g_audioPlaybackConnections.end())
 		{
-			StopAndCleanupWorker(worker.second);
-		}
-		g_workerProcesses.clear();
-
-		for (const auto& item : g_audioPlaybackConnections)
-		{
-			sender.SetDisplayStatus(item.second.first, {}, DevicePickerDisplayStatusOptions::None);
-		}
-		g_audioPlaybackConnections.clear();
-		sender.SetDisplayStatus(device, {}, DevicePickerDisplayStatusOptions::None);
-
-		for (const auto& reconnectDevice : reconnectDevices)
-		{
-			ConnectDevice(sender, reconnectDevice);
+			sender.SetDisplayStatus(itConn->second.first, {}, DevicePickerDisplayStatusOptions::None);
+			g_audioPlaybackConnections.erase(itConn);
 		}
 
 		UpdateNotifyIcon();

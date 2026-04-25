@@ -49,7 +49,9 @@ NOTIFYICONIDENTIFIER g_niid = {
 UINT WM_TASKBAR_CREATED = 0;
 bool g_reconnect = false;
 bool g_showNotification = true;
+bool g_lowLatency = false;
 std::vector<std::wstring> g_lastDevices;
+std::wstring g_outputDeviceId;
 
 #include "Util.hpp"
 #include "FnvHash.hpp"

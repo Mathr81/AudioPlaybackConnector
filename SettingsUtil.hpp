@@ -7,7 +7,9 @@ void DefaultSettings()
 {
 	g_reconnect = false;
 	g_showNotification = true;
+	g_lowLatency = false;
 	g_lastDevices.clear();
+	g_outputDeviceId.clear();
 }
 
 void LoadSettings()
@@ -38,6 +40,12 @@ void LoadSettings()
 		if (jsonObj.HasKey(L"showNotification"))
 			g_showNotification = jsonObj.Lookup(L"showNotification").GetBoolean();
 
+		if (jsonObj.HasKey(L"lowLatency"))
+			g_lowLatency = jsonObj.Lookup(L"lowLatency").GetBoolean();
+
+		if (jsonObj.HasKey(L"outputDeviceId"))
+			g_outputDeviceId = jsonObj.Lookup(L"outputDeviceId").GetString();
+
 		auto lastDevices = jsonObj.Lookup(L"lastDevices").GetArray();
 		g_lastDevices.reserve(lastDevices.Size());
 		for (const auto& i : lastDevices)
@@ -56,6 +64,8 @@ void SaveSettings()
 		JsonObject jsonObj;
 		jsonObj.Insert(L"reconnect", JsonValue::CreateBooleanValue(g_reconnect));
 		jsonObj.Insert(L"showNotification", JsonValue::CreateBooleanValue(g_showNotification));
+		jsonObj.Insert(L"lowLatency", JsonValue::CreateBooleanValue(g_lowLatency));
+		jsonObj.Insert(L"outputDeviceId", JsonValue::CreateStringValue(g_outputDeviceId));
 
 		JsonArray lastDevices;
 		for (const auto& i : g_audioPlaybackConnections)

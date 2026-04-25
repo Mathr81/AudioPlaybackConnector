@@ -21,6 +21,9 @@ Forked from [ysc3839/AudioPlaybackConnector](https://github.com/ysc3839/AudioPla
 
 ## Features
 In addition to the features from the aforementioned forked projects, the following functionality has been implemented:
+* **Audio Output Device Selection**: Choose which PC device plays the remote audio.
+* **Low Latency Mode**: Runs audio processes with high priority for better performance.
+* **Improved Multi-device Support**: Connect and disconnect multiple Bluetooth devices independently without interrupting others.
 * Optional notification on application startup
 
 Tested only on Windows 11 23H2 (as I am using Win11). Compatibility with other versions is not guaranteed.

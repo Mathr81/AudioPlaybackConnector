@@ -67,3 +67,15 @@ msgstr ""
 #: AudioPlaybackConnector.cpp:362
 msgid "Connected"
 msgstr ""
+
+msgid "System Default"
+msgstr ""
+
+msgid "Low Latency Mode"
+msgstr ""
+
+msgid "Output Device"
+msgstr ""
+
+msgid "Open Sound Settings"
+msgstr ""
